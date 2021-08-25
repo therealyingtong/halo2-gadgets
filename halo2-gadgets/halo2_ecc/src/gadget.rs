@@ -64,6 +64,16 @@ pub trait EccInstructions<C: CurveAffine>:
         value: Option<C>,
     ) -> Result<Self::Point, Error>;
 
+    /// Copies a point given existing x- and y-coordinate variables,
+    /// checking that the coordinates indeed belong to a valid point.
+    /// This maps the identity to (0, 0) in affine coordinates.
+    fn copy_point(
+        &self,
+        layouter: &mut impl Layouter<C::Base>,
+        x: Self::Var,
+        y: Self::Var,
+    ) -> Result<Self::Point, Error>;
+
     /// Extracts the x-coordinate of a point.
     fn extract_p(point: &Self::Point) -> &Self::X;
 
@@ -176,6 +186,17 @@ impl<C: CurveAffine, EccChip: EccInstructions<C>> Point<C, EccChip> {
         value: Option<C>,
     ) -> Result<Self, Error> {
         let point = chip.witness_point(&mut layouter, value);
+        point.map(|inner| Point { chip, inner })
+    }
+
+    /// Constructs a new point by copying in its coordinates as `x`, `y` cells.
+    pub fn copy(
+        chip: EccChip,
+        mut layouter: impl Layouter<C::Base>,
+        x: EccChip::Var,
+        y: EccChip::Var,
+    ) -> Result<Self, Error> {
+        let point = chip.copy_point(&mut layouter, x, y);
         point.map(|inner| Point { chip, inner })
     }
 
