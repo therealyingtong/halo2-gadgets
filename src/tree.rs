@@ -3,10 +3,10 @@
 use crate::{
     constants::{
         sinsemilla::{i2lebsp_k, L_ORCHARD_MERKLE, MERKLE_CRH_PERSONALIZATION},
-        util::gen_const_array,
         MERKLE_DEPTH_ORCHARD,
     },
     note::commitment::ExtractedNoteCommitment,
+    spec::gen_const_array,
 };
 use incrementalmerkletree::{Altitude, Hashable};
 use pasta_curves::{arithmetic::FieldExt, pallas};
