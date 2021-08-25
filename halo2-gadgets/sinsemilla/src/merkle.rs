@@ -13,15 +13,11 @@ use std::iter;
 
 pub mod chip;
 
-/// SWU hash-to-curve personalization for the Merkle CRH generator
-pub const MERKLE_CRH_PERSONALIZATION: &str = "z.cash:Orchard-MerkleCRH";
+/// Depth of the Merkle tree.
+pub(crate) const MERKLE_DEPTH: usize = 32;
 
-/// $\mathsf{MerkleDepth^{Orchard}}$
-pub(crate) const MERKLE_DEPTH_ORCHARD: usize = 32;
-
-/// $\ell^\mathsf{Orchard}_\mathsf{base}$
 /// Number of bits in a Pallas base field element.
-pub(crate) const L_ORCHARD_BASE: usize = 255;
+pub(crate) const L_PALLAS_BASE: usize = 255;
 
 /// The sequence of bits representing a u64 in little-endian order.
 ///
@@ -50,7 +46,7 @@ pub trait MerkleInstructions<
 {
     /// Compute MerkleCRH for a given `layer`. The hash that computes the root
     /// is at layer 0, and the hashes that are applied to two leaves are at
-    /// layer `MERKLE_DEPTH_ORCHARD - 1` = layer 31.
+    /// layer `MERKLE_DEPTH - 1` = layer 31.
     #[allow(non_snake_case)]
     fn hash_layer(
         &self,
@@ -135,7 +131,7 @@ where
 
         let mut node = leaf;
         for (l, ((sibling, pos), chip)) in path.iter().zip(pos.iter()).zip(chips).enumerate() {
-            // `l` = MERKLE_DEPTH_ORCHARD - layer - 1, which is the index obtained from
+            // `l` = MERKLE_DEPTH - layer - 1, which is the index obtained from
             // enumerating this Merkle path (going from leaf to root).
             // For example, when `layer = 31` (the first sibling on the Merkle path),
             // we have `l` = 32 - 31 - 1 = 0.
@@ -164,46 +160,66 @@ where
     }
 }
 
-#[cfg(test)]
-pub mod tests {
+#[cfg(feature = "testing")]
+pub mod testing {
     use super::{
         chip::{MerkleChip, MerkleConfig},
-        i2lebsp, MerklePath, L_ORCHARD_BASE, MERKLE_CRH_PERSONALIZATION, MERKLE_DEPTH_ORCHARD,
+        i2lebsp, MerklePath, L_PALLAS_BASE, MERKLE_DEPTH,
     };
 
-    use crate::{chip::SinsemillaChip, primitive::HashDomain};
+    use crate::{
+        chip::SinsemillaChip,
+        gadget::{CommitDomains, HashDomains},
+        primitive::HashDomain,
+    };
+
+    use ecc::gadget::FixedPoints;
     use utilities::{lookup_range_check::LookupRangeCheckConfig, UtilitiesInstructions, Var};
 
-    use orchard::constants::{OrchardCommitDomains, OrchardFixedBases, OrchardHashDomains};
-
     use ff::PrimeFieldBits;
+    use group::prime::PrimeCurveAffine;
     use halo2::{
-        arithmetic::FieldExt,
         circuit::{Layouter, SimpleFloorPlanner},
-        dev::MockProver,
-        pasta::pallas,
         plonk::{Circuit, ConstraintSystem, Error},
     };
+    use pasta_curves::pallas;
 
-    use rand::random;
     use std::convert::TryInto;
+    use std::marker::PhantomData;
 
     #[derive(Default)]
-    struct MyCircuit {
-        leaf: Option<pallas::Base>,
-        leaf_pos: Option<u32>,
-        merkle_path: Option<[pallas::Base; MERKLE_DEPTH_ORCHARD]>,
+    pub struct MyCircuit<Hash, Commit, FixedBase, S: MerkleTest<Hash>>
+    where
+        Hash: HashDomains<pallas::Affine>,
+        Commit: CommitDomains<pallas::Affine, FixedBase, Hash>,
+        FixedBase: FixedPoints<pallas::Affine>,
+    {
+        pub leaf: Option<pallas::Base>,
+        pub leaf_pos: Option<u32>,
+        pub merkle_path: Option<[pallas::Base; MERKLE_DEPTH]>,
+        pub _marker: PhantomData<(Hash, Commit, FixedBase, S)>,
     }
 
-    impl Circuit<pallas::Base> for MyCircuit {
+    impl<Hash, Commit, FixedBase, S: MerkleTest<Hash>> Circuit<pallas::Base>
+        for MyCircuit<Hash, Commit, FixedBase, S>
+    where
+        Hash: HashDomains<pallas::Affine>,
+        Commit: CommitDomains<pallas::Affine, FixedBase, Hash>,
+        FixedBase: FixedPoints<pallas::Affine>,
+    {
         type Config = (
-            MerkleConfig<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>,
-            MerkleConfig<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>,
+            MerkleConfig<Hash, Commit, FixedBase>,
+            MerkleConfig<Hash, Commit, FixedBase>,
         );
         type FloorPlanner = SimpleFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
-            Self::default()
+            Self {
+                leaf: None,
+                leaf_pos: None,
+                merkle_path: None,
+                _marker: PhantomData,
+            }
         }
 
         fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
@@ -267,7 +283,7 @@ pub mod tests {
             mut layouter: impl Layouter<pallas::Base>,
         ) -> Result<(), Error> {
             // Load generator table (shared across both configs)
-            SinsemillaChip::<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>::load(
+            SinsemillaChip::<Hash, Commit, FixedBase>::load(
                 config.0.sinsemilla_config.clone(),
                 &mut layouter,
             )?;
@@ -285,7 +301,7 @@ pub mod tests {
             let path = MerklePath {
                 chip_1,
                 chip_2,
-                domain: OrchardHashDomains::MerkleCrh,
+                domain: S::hash_domain(),
                 leaf_pos: self.leaf_pos,
                 path: self.merkle_path,
             };
@@ -294,10 +310,14 @@ pub mod tests {
                 path.calculate_root(layouter.namespace(|| "calculate root"), leaf)?;
 
             if let Some(leaf_pos) = self.leaf_pos {
+                let domain = HashDomain {
+                    Q: S::hash_domain().Q().to_curve(),
+                };
+
                 // The expected final root
                 let pos_bool = i2lebsp::<32>(leaf_pos as u64);
                 let path: Option<Vec<pallas::Base>> = self.merkle_path.map(|path| path.to_vec());
-                let final_root = hash_path(self.leaf.unwrap(), &pos_bool, &path.unwrap());
+                let final_root = hash_path(domain, self.leaf.unwrap(), &pos_bool, &path.unwrap());
 
                 // Check the computed final root against the expected final root.
                 assert_eq!(computed_final_root.value().unwrap(), final_root);
@@ -307,9 +327,12 @@ pub mod tests {
         }
     }
 
-    fn hash_path(leaf: pallas::Base, pos_bool: &[bool], path: &[pallas::Base]) -> pallas::Base {
-        let domain = HashDomain::new(MERKLE_CRH_PERSONALIZATION);
-
+    pub fn hash_path(
+        domain: HashDomain,
+        leaf: pallas::Base,
+        pos_bool: &[bool],
+        path: &[pallas::Base],
+    ) -> pallas::Base {
         // Compute the root
         let mut node = leaf;
         for (l, (sibling, pos)) in path.iter().zip(pos_bool.iter()).enumerate() {
@@ -324,13 +347,13 @@ pub mod tests {
                 .to_le_bits()
                 .iter()
                 .by_val()
-                .take(L_ORCHARD_BASE)
+                .take(L_PALLAS_BASE)
                 .collect();
             let right: Vec<_> = right
                 .to_le_bits()
                 .iter()
                 .by_val()
-                .take(L_ORCHARD_BASE)
+                .take(L_PALLAS_BASE)
                 .collect();
 
             let mut message = l_star.to_vec();
@@ -342,25 +365,110 @@ pub mod tests {
         node
     }
 
+    pub trait MerkleTest<Hash: HashDomains<pallas::Affine>> {
+        fn hash_domain() -> Hash;
+    }
+}
+
+#[cfg(feature = "testing")]
+#[cfg(feature = "test-ecc")]
+pub mod tests {
+    use ecc::{
+        chip::{compute_lagrange_coeffs, find_zs_and_us, NUM_WINDOWS},
+        gadget::{FixedPoints, H},
+    };
+
+    use crate::{
+        gadget::{CommitDomains, HashDomains},
+        primitive::{CommitDomain, HashDomain},
+    };
+
+    use group::Curve;
+    use pasta_curves::pallas;
+
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref PERSONALIZATION: &'static str = "MerkleCRH";
+        static ref HASH_DOMAIN: HashDomain = HashDomain::new(*PERSONALIZATION);
+        static ref Q: pallas::Affine = HASH_DOMAIN.Q().to_affine();
+        static ref R: pallas::Affine = CommitDomain::new(*PERSONALIZATION).R().to_affine();
+        static ref ZS_AND_US: Vec<(u64, [[u8; 32]; H])> = find_zs_and_us(*R, NUM_WINDOWS).unwrap();
+    }
+
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct FixedBase;
+    impl FixedPoints<pallas::Affine> for FixedBase {
+        fn generator(&self) -> pallas::Affine {
+            *R
+        }
+
+        fn u(&self) -> Vec<[[u8; 32]; H]> {
+            ZS_AND_US.iter().map(|(_, us)| *us).collect()
+        }
+
+        fn z(&self) -> Vec<u64> {
+            ZS_AND_US.iter().map(|(z, _)| *z).collect()
+        }
+
+        fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+            compute_lagrange_coeffs(self.generator(), NUM_WINDOWS)
+        }
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct Hash;
+    impl HashDomains<pallas::Affine> for Hash {
+        fn Q(&self) -> pallas::Affine {
+            *Q
+        }
+    }
+
+    // This test does not make use of the CommitDomain.
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    pub struct Commit;
+    impl CommitDomains<pallas::Affine, FixedBase, Hash> for Commit {
+        fn r(&self) -> FixedBase {
+            FixedBase
+        }
+
+        fn hash_domain(&self) -> Hash {
+            Hash
+        }
+    }
+
+    struct Test;
+    impl super::testing::MerkleTest<Hash> for Test {
+        fn hash_domain() -> Hash {
+            Hash
+        }
+    }
+
     #[test]
     fn merkle_chip() {
+        use crate::merkle::{i2lebsp, MERKLE_DEPTH};
+        use halo2::dev::MockProver;
+        use pasta_curves::arithmetic::FieldExt;
+        use rand::random;
+        use std::convert::TryInto;
+
         // Choose a random leaf and position
         let leaf = pallas::Base::rand();
         let pos = random::<u32>();
         let pos_bool = i2lebsp::<32>(pos as u64);
 
         // Choose a path of random inner nodes
-        let path: Vec<_> = (0..(MERKLE_DEPTH_ORCHARD))
-            .map(|_| pallas::Base::rand())
-            .collect();
+        let path: Vec<_> = (0..(MERKLE_DEPTH)).map(|_| pallas::Base::rand()).collect();
 
         // This root is provided as a public input in the Orchard circuit.
-        let _root = hash_path(leaf, &pos_bool, &path);
+        let domain = HashDomain::new(*PERSONALIZATION);
+        let _root = super::testing::hash_path(domain, leaf, &pos_bool, &path);
 
-        let circuit = MyCircuit {
+        let circuit = super::testing::MyCircuit::<Hash, Commit, FixedBase, Test> {
             leaf: Some(leaf),
             leaf_pos: Some(pos),
             merkle_path: Some(path.try_into().unwrap()),
+            _marker: std::marker::PhantomData,
         };
 
         let prover = MockProver::run(11, &circuit, vec![]).unwrap();
@@ -376,7 +484,7 @@ pub mod tests {
         root.fill(&WHITE).unwrap();
         let root = root.titled("MerkleCRH Path", ("sans-serif", 60)).unwrap();
 
-        let circuit = MyCircuit::default();
+        let circuit = super::testing::MyCircuit::<Hash, Commit, FixedBase, Test>::default();
         halo2::dev::CircuitLayout::default()
             .show_labels(false)
             .render(11, &circuit, &root)
