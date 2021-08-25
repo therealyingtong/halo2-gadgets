@@ -385,9 +385,9 @@ impl Config {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "testing")]
 pub mod tests {
-    use group::{prime::PrimeCurveAffine, Curve};
+    use group::{prime::PrimeCurveAffine, Curve, Group};
     use halo2::{circuit::Layouter, plonk::Error};
     use pasta_curves::{arithmetic::CurveExt, pallas};
 
@@ -397,31 +397,44 @@ pub mod tests {
     pub fn test_add<EccChip: EccInstructions<pallas::Affine> + Clone + Eq + std::fmt::Debug>(
         chip: EccChip,
         mut layouter: impl Layouter<pallas::Base>,
-        zero: &Point<pallas::Affine, EccChip>,
-        p_val: pallas::Affine,
-        p: &Point<pallas::Affine, EccChip>,
-        q_val: pallas::Affine,
-        q: &Point<pallas::Affine, EccChip>,
-        p_neg: &Point<pallas::Affine, EccChip>,
     ) -> Result<(), Error> {
+        // Generate a random point P
+        let p_val = pallas::Point::random(rand::rngs::OsRng).to_affine(); // P
+        let p = Point::new(chip.clone(), layouter.namespace(|| "P"), Some(p_val))?;
+        let p_neg = -p_val;
+        let p_neg = Point::new(chip.clone(), layouter.namespace(|| "-P"), Some(p_neg))?;
+
+        // Generate a random point Q
+        let q_val = pallas::Point::random(rand::rngs::OsRng).to_affine(); // Q
+        let q = Point::new(chip.clone(), layouter.namespace(|| "Q"), Some(q_val))?;
+
         // Make sure P and Q are not the same point.
         assert_ne!(p_val, q_val);
 
+        // Generate a (0,0) point to be used in other tests.
+        let zero = {
+            Point::new(
+                chip.clone(),
+                layouter.namespace(|| "identity"),
+                Some(pallas::Affine::identity()),
+            )?
+        };
+
         // Check complete addition P + (-P)
         {
-            let result = p.add(layouter.namespace(|| "P + (-P)"), p_neg)?;
-            result.constrain_equal(layouter.namespace(|| "P + (-P) = 𝒪"), zero)?;
+            let result = p.add(layouter.namespace(|| "P + (-P)"), &p_neg)?;
+            result.constrain_equal(layouter.namespace(|| "P + (-P) = 𝒪"), &zero)?;
         }
 
         // Check complete addition 𝒪 + 𝒪
         {
-            let result = zero.add(layouter.namespace(|| "𝒪 + 𝒪"), zero)?;
-            result.constrain_equal(layouter.namespace(|| "𝒪 + 𝒪 = 𝒪"), zero)?;
+            let result = zero.add(layouter.namespace(|| "𝒪 + 𝒪"), &zero)?;
+            result.constrain_equal(layouter.namespace(|| "𝒪 + 𝒪 = 𝒪"), &zero)?;
         }
 
         // Check P + Q
         {
-            let result = p.add(layouter.namespace(|| "P + Q"), q)?;
+            let result = p.add(layouter.namespace(|| "P + Q"), &q)?;
             let witnessed_result = Point::new(
                 chip.clone(),
                 layouter.namespace(|| "witnessed P + Q"),
@@ -432,7 +445,7 @@ pub mod tests {
 
         // P + P
         {
-            let result = p.add(layouter.namespace(|| "P + P"), p)?;
+            let result = p.add(layouter.namespace(|| "P + P"), &p)?;
             let witnessed_result = Point::new(
                 chip.clone(),
                 layouter.namespace(|| "witnessed P + P"),
@@ -443,14 +456,14 @@ pub mod tests {
 
         // P + 𝒪
         {
-            let result = p.add(layouter.namespace(|| "P + 𝒪"), zero)?;
-            result.constrain_equal(layouter.namespace(|| "P + 𝒪 = P"), p)?;
+            let result = p.add(layouter.namespace(|| "P + 𝒪"), &zero)?;
+            result.constrain_equal(layouter.namespace(|| "P + 𝒪 = P"), &p)?;
         }
 
         // 𝒪 + P
         {
-            let result = zero.add(layouter.namespace(|| "𝒪 + P"), p)?;
-            result.constrain_equal(layouter.namespace(|| "𝒪 + P = P"), p)?;
+            let result = zero.add(layouter.namespace(|| "𝒪 + P"), &p)?;
+            result.constrain_equal(layouter.namespace(|| "𝒪 + P = P"), &p)?;
         }
 
         // (x, y) + (ζx, y) should behave like normal P + Q.
