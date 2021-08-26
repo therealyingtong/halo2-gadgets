@@ -142,6 +142,7 @@ fn poseidon_duplex<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE:
     output
 }
 
+#[derive(Debug)]
 pub(crate) enum Sponge<F, const RATE: usize> {
     Absorbing(SpongeState<F, RATE>),
     Squeezing(SpongeState<F, RATE>),
@@ -156,7 +157,7 @@ impl<F: Copy, const RATE: usize> Sponge<F, RATE> {
 }
 
 /// A Poseidon duplex sponge.
-pub(crate) struct Duplex<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> {
+pub struct Duplex<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> {
     sponge: Sponge<F, RATE>,
     state: State<F, T>,
     pad_and_add: Box<dyn Fn(&mut State<F, T>, &SpongeState<F, RATE>)>,
@@ -165,9 +166,26 @@ pub(crate) struct Duplex<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const
     _marker: PhantomData<S>,
 }
 
+impl<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> fmt::Debug
+    for Duplex<F, S, T, RATE>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Duplex")
+            .field("width", &T)
+            .field("rate", &RATE)
+            .field("R_F", &S::full_rounds())
+            .field("R_P", &S::partial_rounds())
+            .field("sponge", &self.sponge)
+            .field("state", &self.state)
+            .field("mds_matrix", &self.mds_matrix)
+            .field("round_constants", &self.round_constants)
+            .finish()
+    }
+}
+
 impl<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> Duplex<F, S, T, RATE> {
     /// Constructs a new duplex sponge for the given Poseidon specification.
-    pub(crate) fn new(
+    pub fn new(
         spec: S,
         initial_capacity_element: F,
         pad_and_add: Box<dyn Fn(&mut State<F, T>, &SpongeState<F, RATE>)>,
@@ -189,7 +207,7 @@ impl<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> Duplex
     }
 
     /// Absorbs an element into the sponge.
-    pub(crate) fn absorb(&mut self, value: F) {
+    pub fn absorb(&mut self, value: F) {
         match self.sponge {
             Sponge::Absorbing(ref mut input) => {
                 for entry in input.iter_mut() {
@@ -217,7 +235,7 @@ impl<F: FieldExt, S: Spec<F, T, RATE>, const T: usize, const RATE: usize> Duplex
     }
 
     /// Squeezes an element from the sponge.
-    pub(crate) fn squeeze(&mut self) -> F {
+    pub fn squeeze(&mut self) -> F {
         loop {
             match self.sponge {
                 Sponge::Absorbing(ref input) => {
